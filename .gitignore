@@ -1,0 +1,50 @@
+# Azure DevOps (usando GitHub Actions en su lugar)
+azure-pipelines.yml
+azure-pipeline*.yml
+
+# Node
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+package-lock.json
+
+# Kubernetes
+kubeconfig
+*.kubeconfig
+.kube/
+
+# Docker
+.dockerignore
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment variables
+.env
+.env.local
+.env*.local
+
+# Logs
+logs/
+*.log
+
+# Terraform (si se usa)
+.terraform/
+*.tfstate
+*.tfstate.backup
+.terraform.lock.hcl
+
+# Secrets
+secrets/
+*.pem
+*.key
+*.crt
