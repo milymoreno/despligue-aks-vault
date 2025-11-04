@@ -63,11 +63,14 @@ jobs:
       with:
         version: 'latest'
     
-    - name: Configure kubeconfig
+    - name: Azure Login
+      uses: azure/login@v1
+      with:
+        creds: ${{ secrets.AZURE_CREDENTIALS }}
+    
+    - name: Get AKS credentials
       run: |
-        mkdir -p $HOME/.kube
-        echo "${{ secrets.KUBECONFIG_B64 }}" | base64 -d > $HOME/.kube/config
-        chmod 600 $HOME/.kube/config
+        az aks get-credentials --resource-group rg-aks-holamundo-dev --name aks-holamundo-dev --overwrite-existing
         kubectl version --client
     
     - name: Create/Update Secret
