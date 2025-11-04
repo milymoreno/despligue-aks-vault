@@ -59,9 +59,13 @@ spec:
               cpu: "50m"
               memory: "64Mi"
             limits:
-              cpu: "250m"
-              memory: "256Mi"
-      # En línea con el Dockerfile (usuario no root)
+              cpu: "100m"
+              memory: "128Mi"
+          securityContext:
+            runAsUser: 1000
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            # Nota: si necesitas acceso a archivos, añade volumeMounts aquí
       securityContext:
         runAsNonRoot: true
       terminationGracePeriodSeconds: 30
