@@ -1,0 +1,139 @@
+# azure-pipelines.yml — Build & Deploy
+trigger:
+  branches:
+    include: [ main, master ]
+
+pr:
+  branches:
+    include: [ "*" ]
+
+# Usar Microsoft-hosted agents (NO el self-hosted)
+pool:
+  vmImage: 'ubuntu-latest'
+
+# Variables seguras desde Library: acceso-ecr
+variables:
+- group: acceso-ecr
+- name: acrLoginServer
+  value: 'holamundoacr.azurecr.io'
+- name: imageRepo
+  value: 'holamundo/hello'
+- name: svcName
+  value: 'holamundo'
+- name: containerName
+  value: 'holamundo'
+- name: namespace
+  value: 'default'
+- name: k8sManifestsPath
+  value: 'k8s'
+- name: k8sSecretName
+  value: 'app-secret'
+- name: k8sSecretKey
+  value: 'APP_MESSAGE'
+- name: buildTag
+  value: '$(Build.SourceVersionShort)'
+- name: buildTagFallback
+  value: '$(Build.BuildId)'
+
+stages:
+
+# =============== BUILD & PUSH ===============
+- stage: Build
+  displayName: Build & Push Image
+  jobs:
+  - job: BuildAndPush
+    displayName: Build and push Docker image
+    steps:
+    - checkout: self
+
+    - bash: |
+        set -euo pipefail
+        TAG="$(buildTag)"
+        if [ -z "$TAG" ] || [ "$TAG" = "$(buildTag)" ]; then
+          TAG="$(buildTagFallback)"
+        fi
+        echo "Resolved TAG=$TAG"
+        echo "##vso[task.setvariable variable=RESOLVED_TAG;isOutput=true]$TAG"
+      name: ResolveTag
+      displayName: 'Resolve tag'
+
+    - bash: |
+        set -euo pipefail
+        echo "Login → $(acrLoginServer)"
+        echo "${ACR_PASSWORD}" | docker login $(acrLoginServer) -u "${ACR_USERNAME}" --password-stdin
+
+        echo "Building image…"
+        docker build \
+          -t $(acrLoginServer)/$(imageRepo):$(ResolveTag.RESOLVED_TAG) \
+          -t $(acrLoginServer)/$(imageRepo):latest .
+
+        echo "Pushing…"
+        docker push $(acrLoginServer)/$(imageRepo):$(ResolveTag.RESOLVED_TAG)
+        docker push $(acrLoginServer)/$(imageRepo):latest
+      displayName: 'Build & Push Docker image'
+      env:
+        ACR_USERNAME: $(ACR_USERNAME)
+        ACR_PASSWORD: $(ACR_PASSWORD)
+
+# =============== DEPLOY ===============
+- stage: Deploy
+  displayName: Deploy to AKS
+  dependsOn: Build
+  jobs:
+  - job: Deploy
+    displayName: Deploy application
+    steps:
+    - checkout: self
+
+    - bash: |
+        set -euo pipefail
+        echo "${KUBECONFIG_B64}" | base64 -d > kubeconfig
+        export KUBECONFIG="$PWD/kubeconfig"
+        kubectl version --client
+        echo "Kubeconfig listo."
+      displayName: 'Prepare kubeconfig'
+      env:
+        KUBECONFIG_B64: $(KUBECONFIG_B64)
+
+    - bash: |
+        set -euo pipefail
+        export KUBECONFIG="$PWD/kubeconfig"
+        if [ -z "${APP_MESSAGE}" ]; then
+          echo "##vso[task.logissue type=error]APP_MESSAGE vacío."
+          exit 1
+        fi
+        kubectl create secret generic $(k8sSecretName) \
+          --from-literal=$(k8sSecretKey)="${APP_MESSAGE}" \
+          -n $(namespace) \
+          --dry-run=client -o yaml | kubectl apply -f -
+      displayName: 'Create/Update Secret'
+      env:
+        APP_MESSAGE: $(APP_MESSAGE)
+
+    - bash: |
+        set -euo pipefail
+        export KUBECONFIG="$PWD/kubeconfig"
+        if [ ! -d "$(k8sManifestsPath)" ]; then
+          echo "##vso[task.logissue type=error]No se encontró $(k8sManifestsPath)."
+          exit 1
+        fi
+        kubectl apply -n $(namespace) -f $(k8sManifestsPath)
+      displayName: 'Apply K8s manifests'
+
+    - bash: |
+        set -euo pipefail
+        export KUBECONFIG="$PWD/kubeconfig"
+        TAG="$(Build.SourceVersionShort)"
+        if [ -z "$TAG" ]; then TAG="$(Build.BuildId)"; fi
+        kubectl set image deployment/$(svcName) \
+          $(containerName)=$(acrLoginServer)/$(imageRepo):$TAG \
+          -n $(namespace) --record
+      displayName: 'Update deployment image'
+
+    - bash: |
+        set -euo pipefail
+        export KUBECONFIG="$PWD/kubeconfig"
+        kubectl rollout status deployment/$(svcName) -n $(namespace) --timeout=300s
+        kubectl get svc -n $(namespace) -o wide
+        kubectl get ingress -n $(namespace) || true
+      displayName: 'Wait rollout & show services'

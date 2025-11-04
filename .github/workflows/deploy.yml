@@ -1,0 +1,99 @@
+name: Build and Deploy to AKS
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+env:
+  ACR_LOGIN_SERVER: holamundoacr.azurecr.io
+  IMAGE_REPO: holamundo/hello
+  AKS_NAMESPACE: default
+  DEPLOYMENT_NAME: holamundo
+  CONTAINER_NAME: holamundo
+
+jobs:
+  build:
+    name: Build and Push Docker Image
+    runs-on: ubuntu-latest
+    
+    outputs:
+      image_tag: ${{ steps.set_tag.outputs.tag }}
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Set image tag
+      id: set_tag
+      run: |
+        TAG="${GITHUB_SHA::7}"
+        echo "tag=$TAG" >> $GITHUB_OUTPUT
+        echo "Image tag: $TAG"
+    
+    - name: Log in to ACR
+      run: |
+        echo "${{ secrets.ACR_PASSWORD }}" | docker login ${{ env.ACR_LOGIN_SERVER }} \
+          -u "${{ secrets.ACR_USERNAME }}" \
+          --password-stdin
+    
+    - name: Build Docker image
+      run: |
+        docker build \
+          -t ${{ env.ACR_LOGIN_SERVER }}/${{ env.IMAGE_REPO }}:${{ steps.set_tag.outputs.tag }} \
+          -t ${{ env.ACR_LOGIN_SERVER }}/${{ env.IMAGE_REPO }}:latest \
+          .
+    
+    - name: Push Docker image
+      run: |
+        docker push ${{ env.ACR_LOGIN_SERVER }}/${{ env.IMAGE_REPO }}:${{ steps.set_tag.outputs.tag }}
+        docker push ${{ env.ACR_LOGIN_SERVER }}/${{ env.IMAGE_REPO }}:latest
+
+  deploy:
+    name: Deploy to AKS
+    runs-on: ubuntu-latest
+    needs: build
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Setup kubectl
+      uses: azure/setup-kubectl@v3
+      with:
+        version: 'latest'
+    
+    - name: Configure kubeconfig
+      run: |
+        echo "${{ secrets.KUBECONFIG_B64 }}" | base64 -d > $HOME/.kube/config
+        kubectl version --client
+    
+    - name: Create/Update Secret
+      run: |
+        kubectl create secret generic app-secret \
+          --from-literal=APP_MESSAGE="${{ secrets.APP_MESSAGE }}" \
+          -n ${{ env.AKS_NAMESPACE }} \
+          --dry-run=client -o yaml | kubectl apply -f -
+    
+    - name: Apply Kubernetes manifests
+      run: |
+        kubectl apply -n ${{ env.AKS_NAMESPACE }} -f k8s/
+    
+    - name: Update deployment image
+      run: |
+        kubectl set image deployment/${{ env.DEPLOYMENT_NAME }} \
+          ${{ env.CONTAINER_NAME }}=${{ env.ACR_LOGIN_SERVER }}/${{ env.IMAGE_REPO }}:${{ needs.build.outputs.image_tag }} \
+          -n ${{ env.AKS_NAMESPACE }} \
+          --record
+    
+    - name: Wait for rollout
+      run: |
+        kubectl rollout status deployment/${{ env.DEPLOYMENT_NAME }} \
+          -n ${{ env.AKS_NAMESPACE }} \
+          --timeout=300s
+    
+    - name: Show services
+      run: |
+        kubectl get svc -n ${{ env.AKS_NAMESPACE }} -o wide
+        kubectl get ingress -n ${{ env.AKS_NAMESPACE }} || true

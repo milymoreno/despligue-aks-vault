@@ -1,0 +1,68 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: holamundo
+  labels:
+    app: holamundo
+spec:
+  replicas: 1
+  revisionHistoryLimit: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 25%
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: holamundo
+  template:
+    metadata:
+      labels:
+        app: holamundo
+    spec:
+      # Si tu cluster NO tiene attach-acr o necesitas credencial, añade:
+      # imagePullSecrets:
+      #   - name: acr-pull-secret
+      containers:
+        - name: holamundo
+          # Se actualizará con kubectl set image en el pipeline
+          image: holamundoacr.azurecr.io/holamundo/hello:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: APP_MESSAGE
+              valueFrom:
+                secretKeyRef:
+                  name: app-secret
+                  key: APP_MESSAGE
+          # Probes para despliegues más confiables
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 6
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 20
+            periodSeconds: 20
+            timeoutSeconds: 2
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "250m"
+              memory: "256Mi"
+      # En línea con el Dockerfile (usuario no root)
+      securityContext:
+        runAsNonRoot: true
+      terminationGracePeriodSeconds: 30
+      dnsPolicy: ClusterFirst

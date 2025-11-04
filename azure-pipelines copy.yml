@@ -1,0 +1,197 @@
+# azure-pipelines.yml
+trigger:
+  branches:
+    include:
+      - main
+      - master
+
+pr:
+  branches:
+    include:
+      - "*"
+pool:
+  name: 'Azure Pipelines'
+  vmImage: 'ubuntu-latest'
+
+
+variables:
+  # ==== AJUSTA ESTAS VARIABLES A TU ENTORNO ====
+  azureSubscription: 'azure-free-trial'   # Nombre del Service Connection en Azure DevOps
+  resourceGroup: 'rg-aks-holamundo-dev'
+  aksName: 'aks-holamundo-dev'
+  acrName: 'holamundoacr'                 # Nombre del ACR (sin .azurecr.io)
+  acrLoginServer: 'holamundoacr.azurecr.io'
+  imageRepo: 'holamundo/hello'            # Repositorio dentro del ACR (puede ser solo 'hello')
+  svcName: 'holamundo'                    # Nombre del Deployment/Service en K8s
+  containerName: 'holamundo'              # Nombre del contenedor dentro del Deployment
+  namespace: 'default'                    # Cambia si usas otro namespace
+  kvName: 'kv-holamundo-dev'              # Key Vault con el secreto
+  kvSecretName: 'hello-greeting'          # Nombre del secreto en Key Vault
+  k8sSecretName: 'app-secret'             # Nombre del Secret en Kubernetes
+  k8sSecretKey: 'APP_MESSAGE'             # Clave dentro del Secret para la variable
+  k8sManifestsPath: 'k8s'                 # Carpeta con manifests (deployment/service/ingress)
+  buildTag: '$(Build.SourceVersionShort)' # Tag único por commit (fallback abajo)
+
+  # Fallback si SourceVersionShort no existe (p.ej. builds manuales)
+  buildTagFallback: '$(Build.BuildId)'
+
+stages:
+# =========================
+# 1) BUILD & PUSH A ACR
+# =========================
+- stage: Build
+  displayName: Build & Push Image
+  jobs:
+  - job: BuildAndPush
+    displayName: Build image and push to ACR
+    pool:
+      vmImage: 'ubuntu-latest'
+    steps:
+    - checkout: self
+
+    - bash: |
+        set -euo pipefail
+        TAG="$(buildTag)"
+        if [ -z "${TAG}" ] || [ "${TAG}" = "$(buildTag)" ]; then
+          TAG="$(buildTagFallback)"
+        fi
+        echo "##vso[task.setvariable variable=RESOLVED_TAG;isOutput=true]${TAG}"
+        echo "Resolved TAG=${TAG}"
+      name: ResolveTag
+      displayName: Resolve tag
+
+    # Usamos ACR Build (server-side) para evitar docker daemon local
+    - task: AzureCLI@2
+      displayName: ACR Build & Push
+      inputs:
+        azureSubscription: $(azureSubscription)
+        scriptType: bash
+        scriptLocation: inlineScript
+        inlineScript: |
+          set -euo pipefail
+
+          echo "Building with ACR Task (az acr build)..."
+          az acr build \
+            --registry $(acrName) \
+            --image $(imageRepo):$(ResolveTag.RESOLVED_TAG) \
+            --image $(imageRepo):latest \
+            .
+
+# =========================
+# 2) DEPLOY A AKS
+# =========================
+- stage: Deploy
+  displayName: Deploy to AKS
+  dependsOn: Build
+  jobs:
+  - job: Deploy
+    displayName: Deploy manifests and rollout
+    pool:
+      vmImage: 'ubuntu-latest'
+    steps:
+    - checkout: self
+
+    - task: AzureCLI@2
+      displayName: AKS Get Credentials
+      inputs:
+        azureSubscription: $(azureSubscription)
+        scriptType: bash
+        scriptLocation: inlineScript
+        inlineScript: |
+          set -euo pipefail
+          az aks get-credentials -g $(resourceGroup) -n $(aksName) --overwrite-existing
+
+          # (Opcional) Asegurar que el AKS puede jalar imágenes del ACR.
+          # Idealmente esto se hace una sola vez fuera del pipeline, pero lo dejamos idempotente aquí.
+          az aks update -g $(resourceGroup) -n $(aksName) --attach-acr $(acrName) >/dev/null 2>&1 || true
+
+    # Obtener secreto desde Key Vault y crear/actualizar Secret en Kubernetes
+    - task: AzureCLI@2
+      displayName: Key Vault -> Kubernetes Secret
+      inputs:
+        azureSubscription: $(azureSubscription)
+        scriptType: bash
+        scriptLocation: inlineScript
+        inlineScript: |
+          set -euo pipefail
+
+          echo "Reading secret '$(kvSecretName)' from Key Vault '$(kvName)'..."
+          # NO hacemos echo del valor para no exponerlo en logs
+          SECRET_VALUE="$(az keyvault secret show --vault-name $(kvName) --name $(kvSecretName) --query 'value' -o tsv)"
+
+          if [ -z "${SECRET_VALUE}" ]; then
+            echo "##vso[task.logissue type=error]El secreto $(kvSecretName) está vacío o no se pudo leer."
+            exit 1
+          fi
+
+          echo "Creating/Updating Kubernetes Secret '$(k8sSecretName)' in namespace '$(namespace)'..."
+          kubectl create secret generic $(k8sSecretName) \
+            --from-literal=$(k8sSecretKey)="${SECRET_VALUE}" \
+            -n $(namespace) \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+    # Aplicar manifiestos (Deployment/Service/Ingress)
+    - task: AzureCLI@2
+      displayName: kubectl apply manifests
+      inputs:
+        azureSubscription: $(azureSubscription)
+        scriptType: bash
+        scriptLocation: inlineScript
+        inlineScript: |
+          set -euo pipefail
+          if [ ! -d "$(k8sManifestsPath)" ]; then
+            echo "##vso[task.logissue type=error]No se encontró la carpeta $(k8sManifestsPath) con los manifiestos."
+            exit 1
+          fi
+          kubectl apply -n $(namespace) -f "$(k8sManifestsPath)"
+
+    # Actualizar la imagen del deployment con el tag recién construido
+    - task: AzureCLI@2
+      displayName: Set image on Deployment
+      inputs:
+        azureSubscription: $(azureSubscription)
+        scriptType: bash
+        scriptLocation: inlineScript
+        inlineScript: |
+          set -euo pipefail
+
+          # Resolver TAG igual que en la etapa Build
+          TAG="$(System.StageAttempt)"
+          # Preferimos recuperar desde la stage Build usando variables de salida si se publicaran; aquí replicamos lógica:
+          TAG_ENV="$(Build.SourceVersionShort)"
+          if [ -z "${TAG_ENV}" ]; then
+            TAG_ENV="$(Build.BuildId)"
+          fi
+
+          # Usaremos la misma estrategia del stage Build: si existe RESOLVED_TAG, úsalo; si no, TAG_ENV
+          RESOLVED_TAG="${TAG_ENV}"
+
+          echo "Setting image to $(acrLoginServer)/$(imageRepo):${RESOLVED_TAG} on deployment $(svcName) (container: $(containerName)) in namespace $(namespace)"
+          kubectl set image deployment/$(svcName) \
+            $(containerName)=$(acrLoginServer)/$(imageRepo):${RESOLVED_TAG} \
+            -n $(namespace) --record
+
+    # Esperar rollout OK
+    - task: AzureCLI@2
+      displayName: Wait for rollout
+      inputs:
+        azureSubscription: $(azureSubscription)
+        scriptType: bash
+        scriptLocation: inlineScript
+        inlineScript: |
+          set -euo pipefail
+          kubectl rollout status deployment/$(svcName) -n $(namespace) --timeout=300s
+
+    # Mostrar Service para facilitar validación (ClusterIP/LB/Ingress)
+    - task: AzureCLI@2
+      displayName: Show service endpoints
+      inputs:
+        azureSubscription: $(azureSubscription)
+        scriptType: bash
+        scriptLocation: inlineScript
+        inlineScript: |
+          set -euo pipefail
+          echo "=== Services in $(namespace) ==="
+          kubectl get svc -n $(namespace) -o wide
+          echo "=== Ingress in $(namespace) ==="
+          kubectl get ingress -n $(namespace) || true
