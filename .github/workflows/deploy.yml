@@ -1,4 +1,4 @@
-name: Build and Deploy to AKS
+name: Build and Deploy to AKS Hello World
 on:
   push:
     branches: [ main, master ]
