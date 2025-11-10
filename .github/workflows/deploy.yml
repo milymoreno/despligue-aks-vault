@@ -73,12 +73,18 @@ jobs:
         az aks get-credentials --resource-group rg-aks-holamundo-dev --name aks-holamundo-dev --overwrite-existing
         kubectl version --client
     
-    - name: Create/Update Secret
+    - name: Get secret from Azure Key Vault and create Kubernetes Secret
       run: |
+        # Obtener secreto desde Azure Key Vault
+        APP_MESSAGE=$(az keyvault secret show --name APP-MESSAGE --vault-name kv-holamundo-dev --query value -o tsv)
+        
+        # Crear/actualizar Secret en Kubernetes
         kubectl create secret generic app-secret \
-          --from-literal=APP_MESSAGE="${{ secrets.APP_MESSAGE }}" \
+          --from-literal=APP_MESSAGE="$APP_MESSAGE" \
           -n ${{ env.AKS_NAMESPACE }} \
           --dry-run=client -o yaml | kubectl apply -f -
+        
+        echo "✅ Secreto obtenido desde Key Vault e inyectado en Kubernetes"
     
     - name: Apply Kubernetes manifests
       run: |

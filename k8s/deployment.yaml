@@ -40,7 +40,7 @@ spec:
           # Probes para despliegues más confiables
           readinessProbe:
             httpGet:
-              path: /
+              path: /hello
               port: http
             initialDelaySeconds: 5
             periodSeconds: 10
@@ -48,7 +48,7 @@ spec:
             failureThreshold: 6
           livenessProbe:
             httpGet:
-              path: /
+              path: /hello
               port: http
             initialDelaySeconds: 20
             periodSeconds: 20

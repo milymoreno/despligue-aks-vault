@@ -4,8 +4,13 @@ const PORT = process.env.PORT || 8080;
 const MESSAGE = process.env.APP_MESSAGE || 'Hola Mundo desde AKS 👋';
 
 const server = http.createServer((req, res) => {
-  res.writeHead(200, {'Content-Type': 'text/plain; charset=utf-8'});
-  res.end(`${MESSAGE}\n`);
+  if (req.url === '/hello') {
+    res.writeHead(200, {'Content-Type': 'text/plain; charset=utf-8'});
+    res.end(`${MESSAGE}\n`);
+  } else {
+    res.writeHead(404, {'Content-Type': 'text/plain; charset=utf-8'});
+    res.end('Not Found. Try /hello\n');
+  }
 });
 
 server.listen(PORT, () => {
