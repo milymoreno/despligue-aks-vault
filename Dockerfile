@@ -1,5 +1,5 @@
 # Imagen base estable (puedes fijar minor/alpine si quieres aún más reproducibilidad)
-FROM node:18-slim
+FROM node:18-alpine
 
 # Variables de entorno y workdir
 ENV NODE_ENV=production
