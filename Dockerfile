@@ -1,4 +1,4 @@
-# Imagen base estable (puedes fijar minor/alpine si quieres aún más reproducibilidad)
+# Imagen base
 FROM node:18-alpine
 
 # Variables de entorno y workdir
